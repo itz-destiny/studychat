@@ -1,0 +1,8 @@
+
+{
+  "name": "Gemini Desktop AI Assistant",
+  "description": "A multi-functional AI assistant featuring a real-time voice interface for task automation, a creative image generator, and an intelligent chatbot, all powered by Google's Gemini models.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
