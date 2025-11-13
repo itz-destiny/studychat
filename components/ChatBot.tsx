@@ -24,9 +24,19 @@ interface ChatBotProps {
   hasMemory: boolean;
   userName: string | null;
   userId: string | null;
+  conversationId: string | null;
+  conversationTitle: string | null;
+  onFirstUserMessage?: (content: string) => void;
 }
 
-const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
+const ChatBot: React.FC<ChatBotProps> = ({
+  hasMemory,
+  userName,
+  userId,
+  conversationId,
+  conversationTitle,
+  onFirstUserMessage,
+}) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -55,11 +65,15 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
 
       const greeting = `Hello${userName ? ` ${userName.split(' ')[0]}` : ''}! I'm VibeChat. How can I support your studies today?`;
 
-      if (hasMemory && userId) {
+      if (hasMemory && userId && conversationId) {
         setIsHistoryLoading(true);
         try {
-          const history = await fetchHistory(userId);
-          setMessages([{ role: 'model', content: greeting }, ...history]);
+          const history = await fetchHistory(userId, conversationId);
+          if (history.length > 0) {
+            setMessages(history);
+          } else {
+            setMessages([{ role: 'model', content: greeting }]);
+          }
         } catch (error) {
           console.error('Failed to load chat history:', error);
           setMessages([{ role: 'model', content: greeting }]);
@@ -70,7 +84,6 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
         setMessages([{ role: 'model', content: greeting }]);
       }
 
-      // clear any pending attachments when auth state changes
       setPendingAttachments(current => {
         current.forEach(item => URL.revokeObjectURL(item.previewUrl));
         return [];
@@ -82,7 +95,7 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
     return () => {
       chatRef.current = null;
     };
-  }, [hasMemory, userId, userName]);
+  }, [hasMemory, userId, userName, conversationId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -94,13 +107,14 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
     };
   }, [pendingAttachments]);
 
-  const canPersistConversation = hasMemory && Boolean(userId);
+  const canPersistConversation = hasMemory && Boolean(userId) && Boolean(conversationId);
 
-  const fetchHistory = async (currentUserId: string): Promise<ChatMessage[]> => {
+  const fetchHistory = async (currentUserId: string, currentConversationId: string): Promise<ChatMessage[]> => {
     const { data, error } = await supabase
       .from('messages')
       .select('role, content, attachments, created_at')
       .eq('user_id', currentUserId)
+      .eq('conversation_id', currentConversationId)
       .order('created_at', { ascending: true });
 
     if (error) {
@@ -254,12 +268,18 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
         attachments: attachmentsForDisplay,
       };
 
+      const existingUserMessages = messages.filter(message => message.role === 'user');
+      if (canPersistConversation && existingUserMessages.length === 0 && trimmedInput && onFirstUserMessage) {
+        onFirstUserMessage(trimmedInput);
+      }
+
       setMessages(prev => [...prev, userMessage]);
       setInput('');
 
       if (canPersistConversation) {
         await supabase.from('messages').insert({
           user_id: userId,
+          conversation_id: conversationId,
           role: 'user',
           content: userMessage.content,
           attachments: attachmentsForStorage ?? null,
@@ -285,6 +305,7 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
       if (canPersistConversation) {
         await supabase.from('messages').insert({
           user_id: userId,
+          conversation_id: conversationId,
           role: 'model',
           content: assistantMessage.content,
           attachments: null,
@@ -399,7 +420,9 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
     <div className="flex h-full flex-col rounded-2xl border border-gray-200 bg-white shadow-sm">
       <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">Study Session</h2>
+          <h2 className="text-lg font-semibold text-gray-900">
+            {conversationTitle || 'Study Session'}
+          </h2>
           {isHistoryLoading && <p className="mt-1 text-xs text-gray-400">Loading your saved chats…</p>}
         </div>
         <span className="text-xs font-medium uppercase tracking-wide text-indigo-500">
@@ -444,7 +467,7 @@ const ChatBot: React.FC<ChatBotProps> = ({ hasMemory, userName, userId }) => {
             className="w-full flex-1 rounded-full border border-gray-200 bg-white px-5 py-3 text-sm text-gray-900 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200"
             disabled={isLoading}
           />
-          <label className={`relative ${!canPersistConversation ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'}`}>
+          <label className={`relative ${!canPersistConversation && pendingAttachments.length === 0 ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'}`}>
             <input
               type="file"
               multiple

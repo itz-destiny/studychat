@@ -1,4 +1,10 @@
 
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: string;
+}
+
 export interface ChatAttachment {
   name: string;
   url: string;

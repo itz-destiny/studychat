@@ -4,12 +4,19 @@ import ChatBot from './components/ChatBot';
 import { SparklesIcon } from './components/Icons';
 import AuthModal from './components/AuthModal';
 import { StoredUser, getCurrentUser, listenToAuthChanges, signIn, signOut, signUp } from './utils/auth';
+import { supabase } from './utils/supabaseClient';
+import type { Conversation } from './types';
+
+const DEFAULT_CONVERSATION_TITLE = 'New chat';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<StoredUser | null>(null);
   const [isTraining, setIsTraining] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup' | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [isConversationsLoading, setIsConversationsLoading] = useState(false);
 
   useEffect(() => {
     const initialize = async () => {
@@ -28,6 +35,46 @@ const App: React.FC = () => {
       listener?.subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    const loadConversations = async () => {
+      if (!user) {
+        setConversations([]);
+        setActiveConversationId(null);
+        return;
+      }
+
+      setIsConversationsLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('conversations')
+          .select('id, title, created_at')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false });
+
+        if (error) {
+          throw error;
+        }
+
+        if (!data || data.length === 0) {
+          const created = await createConversation(user.id, DEFAULT_CONVERSATION_TITLE);
+          if (created) {
+            setConversations([created]);
+            setActiveConversationId(created.id);
+          }
+        } else {
+          setConversations(data);
+          setActiveConversationId(prev => prev ?? data[0].id);
+        }
+      } catch (error) {
+        console.error('Failed to load conversations', error);
+      } finally {
+        setIsConversationsLoading(false);
+      }
+    };
+
+    loadConversations();
+  }, [user]);
 
   const isAuthenticated = useMemo(() => user !== null, [user]);
 
@@ -67,10 +114,49 @@ const App: React.FC = () => {
   const handleLogout = async () => {
     await signOut();
     setUser(null);
+    setConversations([]);
+    setActiveConversationId(null);
     setIsSidebarOpen(false);
   };
 
+  const handleCreateConversation = async () => {
+    if (!user) return;
+    try {
+      const created = await createConversation(user.id, DEFAULT_CONVERSATION_TITLE);
+      if (created) {
+        setConversations(prev => [created, ...prev]);
+        setActiveConversationId(created.id);
+        setIsSidebarOpen(false);
+      }
+    } catch (error) {
+      console.error('Failed to create conversation', error);
+    }
+  };
+
+  const handleSelectConversation = (conversationId: string) => {
+    setActiveConversationId(conversationId);
+    setIsSidebarOpen(false);
+  };
+
+  const updateConversationTitle = async (conversationId: string, firstMessage: string) => {
+    const conversation = conversations.find(conv => conv.id === conversationId);
+    if (!conversation || conversation.title !== DEFAULT_CONVERSATION_TITLE) return;
+
+    const cleanedTitle = generateTitleFromMessage(firstMessage);
+    setConversations(prev =>
+      prev.map(conv => (conv.id === conversationId ? { ...conv, title: cleanedTitle } : conv)),
+    );
+
+    try {
+      await supabase.from('conversations').update({ title: cleanedTitle }).eq('id', conversationId);
+    } catch (error) {
+      console.error('Failed to update conversation title', error);
+    }
+  };
+
   const displayName = user?.name ?? user?.email ?? null;
+  const activeConversation = conversations.find(conv => conv.id === activeConversationId) ?? null;
+  const showHistoryPlaceholder = !isConversationsLoading && isAuthenticated && conversations.length === 0;
 
   return (
     <div className="flex h-screen bg-gray-100 text-gray-900 font-sans">
@@ -123,6 +209,50 @@ const App: React.FC = () => {
             Without signing up, there&apos;s no memory. Training will just act like it&apos;s learning from this session.
           </p>
         </nav>
+        <div className="border-t border-gray-100 px-6 py-5 text-sm">
+          <div className="mb-3 flex items-center justify-between text-xs uppercase tracking-wide text-gray-500">
+            <span>History</span>
+            {isAuthenticated && (
+              <button
+                onClick={handleCreateConversation}
+                className="rounded-lg border border-indigo-200 px-2 py-1 text-indigo-600 transition hover:border-indigo-300 hover:bg-indigo-50"
+              >
+                New
+              </button>
+            )}
+          </div>
+          {isConversationsLoading ? (
+            <p className="text-xs text-gray-400">Loading conversations…</p>
+          ) : showHistoryPlaceholder ? (
+            <p className="text-xs text-gray-500">Start a new chat to see it here.</p>
+          ) : (
+            <div className="space-y-2">
+              {conversations.map(conversation => (
+                <button
+                  key={conversation.id}
+                  onClick={() => handleSelectConversation(conversation.id)}
+                  className={`w-full rounded-lg px-4 py-3 text-left transition-colors ${
+                    conversation.id === activeConversationId
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-50 text-gray-700 hover:bg-indigo-50 hover:text-indigo-600'
+                  }`}
+                >
+                  <p className="truncate text-sm font-medium">
+                    {conversation.title || 'Untitled chat'}
+                  </p>
+                  <p className={`text-xs ${conversation.id === activeConversationId ? 'text-indigo-100' : 'text-gray-500'}`}>
+                    {formatTimestamp(conversation.created_at)}
+                  </p>
+                </button>
+              ))}
+              {!isAuthenticated && (
+                <p className="rounded-lg bg-gray-50 px-4 py-3 text-xs text-gray-500">
+                  Sign in to keep a history of your chats.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
         <div className="space-y-3 px-6 pb-6">
           {isAuthenticated && displayName ? (
             <>
@@ -182,7 +312,18 @@ const App: React.FC = () => {
         )}
         <div className="flex-1 overflow-hidden px-4 pb-8 pt-6 md:px-6">
           <div className="mx-auto h-full w-full max-w-4xl">
-            <ChatBot hasMemory={isAuthenticated} userName={displayName} userId={user?.id ?? null} />
+            <ChatBot
+              hasMemory={isAuthenticated}
+              userName={displayName}
+              userId={user?.id ?? null}
+              conversationId={isAuthenticated ? activeConversationId : null}
+              conversationTitle={activeConversation?.title ?? null}
+              onFirstUserMessage={content => {
+                if (activeConversationId) {
+                  updateConversationTitle(activeConversationId, content);
+                }
+              }}
+            />
           </div>
         </div>
       </main>
@@ -191,3 +332,35 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+const createConversation = async (userId: string, title: string): Promise<Conversation | null> => {
+  const { data, error } = await supabase
+    .from('conversations')
+    .insert({ user_id: userId, title })
+    .select('id, title, created_at')
+    .single();
+
+  if (error) {
+    console.error('Failed to create conversation', error);
+    return null;
+  }
+
+  return data;
+};
+
+const generateTitleFromMessage = (message: string): string => {
+  const cleaned = message.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return DEFAULT_CONVERSATION_TITLE;
+  const words = cleaned.split(' ').slice(0, 6).join(' ');
+  const capitalized = words.charAt(0).toUpperCase() + words.slice(1);
+  return capitalized + (cleaned.split(' ').length > 6 ? '…' : '');
+};
+
+const formatTimestamp = (timestamp: string) => {
+  try {
+    const date = new Date(timestamp);
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch (error) {
+    return '';
+  }
+};
